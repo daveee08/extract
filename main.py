@@ -61,6 +61,31 @@ def extract_pdf_contents(file_path):
 
     return full_text, len(doc), image_data
 
+# Helper function to process rubric dynamically
+def parse_rubric(rubric_text):
+    """
+    Parses rubric text to extract levels and scores dynamically.
+    The rubric is expected to have different levels with corresponding points.
+    Example rubric: 
+    Level Accuracy (3 pts) Clarity (3 pts) Examples (3 pts) Total Points
+    """
+    import re
+
+    # Regular expression pattern to extract "Level" and "pts" (score)
+    pattern = r"(\w+)\s*\((\d+)\s*pts\)"
+    
+    rubric_info = []
+    total_score = 0
+
+    # Find all the level-score pairs
+    matches = re.findall(pattern, rubric_text)
+    for match in matches:
+        level, score = match
+        rubric_info.append({"level": level, "score": int(score)})
+        total_score += int(score)
+    
+    return rubric_info, total_score
+
 # Helper function to process content using AI (Quasar model)
 def process_with_ai(content):
     headers = {
@@ -85,7 +110,7 @@ def process_with_ai(content):
     try:
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=body, headers=headers)
         response.raise_for_status()
-        
+
         # Log tokens if available
         usage = response.json().get("usage", {})
         print(f"[Token Log] prompt_tokens: {usage.get('prompt_tokens')}, completion_tokens: {usage.get('completion_tokens')}, total_tokens: {usage.get('total_tokens')}")
@@ -95,19 +120,13 @@ def process_with_ai(content):
         print("AI call failed:", e)
         return "[]"
 
-# Function to extract and format rubrics dynamically (if necessary)
-def extract_rubric(rubric_text):
-    # Here, you can apply custom logic to format the rubric if it's not structured
-    # For now, this function just returns the text as is
-    return rubric_text
-
 # Pydantic model for extracting and saving question data
 class QuestionItem(BaseModel):
     filename: str
     question: str
     rubric: str
 
-@app.post("/extract/")
+@app.post("/extract/") 
 async def extract_questions(file: UploadFile = File(...)):
     try:
         os.makedirs("temp", exist_ok=True)
@@ -124,7 +143,7 @@ async def extract_questions(file: UploadFile = File(...)):
 
         # Here we modify how the rubrics are processed to be dynamic
         for item in extracted_data:
-            item['rubric'] = extract_rubric(item['rubric'])  # Modify rubric as needed, extracting it into a usable format
+            item['rubric'], total_points = parse_rubric(item['rubric'])  # Modify rubric dynamically
 
         return {
             "filename": file.filename,
@@ -166,14 +185,13 @@ async def save_questions(questions: List[QuestionItem], images: List[dict]):
 class GradingInput(BaseModel):
     filename: str
     answers: List[str]  # List of student answers
-
+    
 @app.post("/grade/") 
 async def grade_answers(input: GradingInput):
     try:
         db = get_db()
         cursor = db.cursor(dictionary=True)
         
-        # Fetch the questions from the database based on the filename
         cursor.execute("SELECT question_text, rubric FROM pdf_questions WHERE filename = %s", (input.filename,))
         questions = cursor.fetchall()
 
@@ -181,11 +199,17 @@ async def grade_answers(input: GradingInput):
             raise HTTPException(status_code=404, detail="Questions not found for this filename")
 
         results = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+
         for i, question in enumerate(questions):
             if i >= len(input.answers):
-                break  # If fewer answers provided than questions
+                break  
 
-            # Prepare the grading prompt for AI
+            # Parse the rubric to extract points and levels dynamically
+            rubric_info, total_points = parse_rubric(question['rubric'])
+
             ai_prompt = f"""
                         You are a grading assistant. Grade the following student answer based on the question and rubric.
 
@@ -193,10 +217,12 @@ async def grade_answers(input: GradingInput):
                         Rubric: {question['rubric']}
                         Student Answer: {input.answers[i]}
 
+                        The rubric provides different levels with corresponding points. Ensure that you evaluate the answer based on these levels.
+
                         Return the result in JSON format:
                         {{
                         "score": int,
-                        "out_of": 10,
+                        "out_of": {total_points},
                         "feedback": "Detailed explanation..."
                         }}
                         """
@@ -209,15 +235,12 @@ async def grade_answers(input: GradingInput):
                 "messages": [{"role": "user", "content": ai_prompt}]
             }
 
-            # Request the AI to grade the answer
             response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=body, headers=headers)
 
             try:
                 ai_result = json.loads(response.json()["choices"][0]["message"]["content"])
 
-                # Check if AI response includes the required grading information
                 if "score" in ai_result and "out_of" in ai_result and "feedback" in ai_result:
-                    # Save to database
                     cursor.execute("""
                         INSERT INTO graded_answers (filename, question_text, student_answer, score, out_of, feedback)
                         VALUES (%s, %s, %s, %s, %s, %s)
@@ -234,13 +257,13 @@ async def grade_answers(input: GradingInput):
                         "out_of": ai_result["out_of"],
                         "feedback": ai_result["feedback"]
                     })
+
                 else:
-                    # Default message if the AI response format is unexpected
                     cursor.execute("""
                         INSERT INTO graded_answers (filename, question_text, student_answer, score, out_of, feedback)
                         VALUES (%s, %s, %s, %s, %s, %s)
                     """, (
-                        input.filename, question['question_text'], input.answers[i], 0, 10,
+                        input.filename, question['question_text'], input.answers[i], 0, total_points,
                         "Unable to grade answer due to unexpected AI response."
                     ))
                     db.commit()
@@ -249,9 +272,19 @@ async def grade_answers(input: GradingInput):
                         "question": question['question_text'],
                         "student_answer": input.answers[i],
                         "score": 0,
-                        "out_of": 10,
+                        "out_of": total_points,
                         "feedback": "Unable to grade answer due to unexpected AI response."
                     })
+
+                # Log and accumulate token usage
+                usage = response.json().get("usage", {})
+                prompt_tokens = usage.get('prompt_tokens', 0)
+                completion_tokens = usage.get('completion_tokens', 0)
+                total_tokens += prompt_tokens + completion_tokens
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
+
+                print(f"[Token Log] Question {i + 1}: prompt_tokens: {prompt_tokens}, completion_tokens: {completion_tokens}, total_tokens: {prompt_tokens + completion_tokens}")
 
             except Exception as e:
                 print("Error parsing AI response:", e)
@@ -259,7 +292,7 @@ async def grade_answers(input: GradingInput):
                     INSERT INTO graded_answers (filename, question_text, student_answer, score, out_of, feedback)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (
-                    input.filename, question['question_text'], input.answers[i], 0, 10,
+                    input.filename, question['question_text'], input.answers[i], 0, total_points,
                     f"Error parsing AI response: {e}"
                 ))
                 db.commit()
@@ -268,9 +301,12 @@ async def grade_answers(input: GradingInput):
                     "question": question['question_text'],
                     "student_answer": input.answers[i],
                     "score": 0,
-                    "out_of": 10,
+                    "out_of": total_points,
                     "feedback": f"Error parsing AI response: {e}"
                 })
+
+        # After all questions are processed, log the total token usage
+        print(f"[Total Token Log] Total prompt_tokens: {total_prompt_tokens}, Total completion_tokens: {total_completion_tokens}, Total tokens: {total_tokens}")
 
         cursor.close()
         db.close()
@@ -279,26 +315,4 @@ async def grade_answers(input: GradingInput):
 
     except Exception as e:
         print(f"Error: {e}")
-        return {"error": str(e)}
-
-@app.get("/questions/{filename}")
-async def get_questions(filename: str):
-    try:
-        db = get_db()
-        cursor = db.cursor(dictionary=True)
-        cursor.execute("SELECT question_text, rubric, images FROM pdf_questions WHERE filename = %s", (filename,))
-        questions = cursor.fetchall()
-        cursor.close()
-        db.close()
-
-        if not questions:
-            raise HTTPException(status_code=404, detail="Questions not found for this filename")
-
-        # Prepare the response to include image paths
-        for question in questions:
-            # If there are images, convert from string (JSON format) to a list
-            question["images"] = json.loads(question["images"])
-        
-        return questions
-    except Exception as e:
         return {"error": str(e)}

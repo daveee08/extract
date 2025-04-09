@@ -8,7 +8,7 @@ st.title("🧑‍🎓 Submit Your Answers")
 
 filename = st.text_input("Enter the related question filename (ask your teacher):")
 
-mode = st.radio("How do you want to submit your answers?", ["Manual Entry", "Upload Answer PDF"])
+mode = st.radio("How do you want to submit your answers?", ["Manual Entry"])
 
 student_answers = []
 
