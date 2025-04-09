@@ -64,7 +64,7 @@ def extract_pdf_contents(file_path):
 # Helper function to process content using AI (Quasar model)
 def process_with_ai(content):
     headers = {
-        "Authorization": f"Bearer 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",
+        "Authorization": f"Bearer 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",
         "Content-Type": "application/json"
     }
     body = {
@@ -200,10 +200,8 @@ async def grade_answers(input: GradingInput):
                         "feedback": "Detailed explanation..."
                         }}
                         """
-            print(f"AI Grading Prompt: {ai_prompt}")  # Log the prompt
-
             headers = {
-                "Authorization": f"Bearer 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",
+                "Authorization": f"Bearer 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",
                 "Content-Type": "application/json"
             }
             body = {
@@ -213,8 +211,6 @@ async def grade_answers(input: GradingInput):
 
             # Request the AI to grade the answer
             response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=body, headers=headers)
-
-            print(f"AI Response: {response.text}")  # Log the response
 
             try:
                 ai_result = json.loads(response.json()["choices"][0]["message"]["content"])
