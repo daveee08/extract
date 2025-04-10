@@ -89,36 +89,36 @@ def parse_rubric(rubric_text):
 # Helper function to process content using AI (Quasar model)
 def process_with_ai(content):
     headers = {
-        "Authorization": f"Bearer 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",
+        "Authorization": f"Bearer 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",
         "Content-Type": "application/json"
     }
     body = {
-    "model": "openrouter/quasar-alpha",
-    "messages": [{
-        "role": "user",
-        "content": """The following text comes from an academic PDF. 
-        Your task is to extract all the questions and any available rubric or marking scheme.
-        Format your reply in JSON like this:
+        "model": "openrouter/quasar-alpha",
+        "messages": [{
+            "role": "user",
+            "content": """The following text comes from an academic PDF. 
+            Your task is to extract all the questions and any available rubric or marking scheme.
+            Format your reply in JSON like this:
 
-        [{"question": "...", "rubric": "..."}]
+            [{"question": "...", "rubric": "..."}]
 
-        Here is the content:
-        """ + content  # Concatenating content here instead of using f-string
-    }]
-}
+            Here is the content:
+            """ + content
+        }]
+    }
 
     try:
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=body, headers=headers)
         response.raise_for_status()
 
-        # Log tokens if available
-        usage = response.json().get("usage", {})
-        print(f"[Token Log] prompt_tokens: {usage.get('prompt_tokens')}, completion_tokens: {usage.get('completion_tokens')}, total_tokens: {usage.get('total_tokens')}")
+        response_json = response.json()
+        message_content = response_json["choices"][0]["message"]["content"]
 
-        return response.json()["choices"][0]["message"]["content"]
+        return message_content
     except Exception as e:
         print("AI call failed:", e)
-        return "[]"
+        return ""  # <-- Return empty string on failure
+
 
 # Pydantic model for extracting and saving question data
 class QuestionItem(BaseModel):
@@ -139,12 +139,26 @@ async def extract_questions(file: UploadFile = File(...)):
         
         # Process extracted content with AI to get questions and rubrics
         ai_json = process_with_ai(raw_text)
-        extracted_data = json.loads(ai_json)
+
+        # Clean up Markdown-style code block if present
+        if ai_json.strip().startswith("```json"):
+            ai_json = ai_json.strip().removeprefix("```json").removesuffix("```").strip()
+
+        try:
+            extracted_data = json.loads(ai_json)
+        except json.JSONDecodeError as e:
+            print("[JSON Error]", e)
+            raise ValueError(f"Invalid JSON returned by AI: {ai_json}")
 
         # Here we modify how the rubrics are processed to be dynamic
         for item in extracted_data:
-            item['rubric'], total_points = parse_rubric(item['rubric'])  # Modify rubric dynamically
-
+            rubric_text = item.get('rubric')
+            if rubric_text:
+                parsed_rubric, _ = parse_rubric(rubric_text)
+                item['parsed_rubric'] = parsed_rubric
+            else:
+                item['parsed_rubric'] = []
+        
         return {
             "filename": file.filename,
             "pages": num_pages,
@@ -185,6 +199,30 @@ async def save_questions(questions: List[QuestionItem], images: List[dict]):
 class GradingInput(BaseModel):
     filename: str
     answers: List[str]  # List of student answers
+    
+
+@app.get("/questions/{filename}")
+async def get_questions(filename: str):
+    try:
+        db = get_db()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT question_text, rubric, images FROM pdf_questions WHERE filename = %s", (filename,))
+        questions = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        if not questions:
+            raise HTTPException(status_code=404, detail="Questions not found for this filename")
+
+        # Prepare the response to include image paths
+        for question in questions:
+            # If there are images, convert from string (JSON format) to a list
+            question["images"] = json.loads(question["images"])
+        
+        return questions
+    except Exception as e:
+        return {"error": str(e)}
+    
     
 @app.post("/grade/") 
 async def grade_answers(input: GradingInput):
@@ -227,7 +265,7 @@ async def grade_answers(input: GradingInput):
                         }}
                         """
             headers = {
-                "Authorization": f"Bearer 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",
+                "Authorization": f"Bearer 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",
                 "Content-Type": "application/json"
             }
             body = {
@@ -284,35 +322,18 @@ async def grade_answers(input: GradingInput):
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens
 
-                print(f"[Token Log] Question {i + 1}: prompt_tokens: {prompt_tokens}, completion_tokens: {completion_tokens}, total_tokens: {prompt_tokens + completion_tokens}")
+                print(f"Prompt tokens used: {prompt_tokens}, Completion tokens used: {completion_tokens}, Total tokens: {total_tokens}")
 
             except Exception as e:
                 print("Error parsing AI response:", e)
-                cursor.execute("""
-                    INSERT INTO graded_answers (filename, question_text, student_answer, score, out_of, feedback)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (
-                    input.filename, question['question_text'], input.answers[i], 0, total_points,
-                    f"Error parsing AI response: {e}"
-                ))
-                db.commit()
 
-                results.append({
-                    "question": question['question_text'],
-                    "student_answer": input.answers[i],
-                    "score": 0,
-                    "out_of": total_points,
-                    "feedback": f"Error parsing AI response: {e}"
-                })
-
-        # After all questions are processed, log the total token usage
-        print(f"[Total Token Log] Total prompt_tokens: {total_prompt_tokens}, Total completion_tokens: {total_completion_tokens}, Total tokens: {total_tokens}")
-
-        cursor.close()
-        db.close()
-
-        return results
+        return {
+            "results": results,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+            "total_tokens": total_tokens
+        }
 
     except Exception as e:
-        print(f"Error: {e}")
-        return {"error": str(e)}
+        print(f"Error during grading: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
