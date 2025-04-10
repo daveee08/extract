@@ -89,7 +89,7 @@ def parse_rubric(rubric_text):
 # Helper function to process content using AI (Quasar model)
 def process_with_ai(content):
     headers = {
-        "Authorization": f"Bearer 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",
+        "Authorization": f"Bearer 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",
         "Content-Type": "application/json"
     }
     body = {
@@ -113,6 +113,14 @@ def process_with_ai(content):
 
         response_json = response.json()
         message_content = response_json["choices"][0]["message"]["content"]
+
+        # Log the token usage if available in the response
+        if "usage" in response_json:
+            usage = response_json["usage"]
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", 0)
+            print(f"Tokens: Prompt {prompt_tokens}, Completion {completion_tokens}, Total {total_tokens}")
 
         return message_content
     except Exception as e:
@@ -265,7 +273,7 @@ async def grade_answers(input: GradingInput):
                         }}
                         """
             headers = {
-                "Authorization": f"Bearer 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",
+                "Authorization": f"Bearer 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",
                 "Content-Type": "application/json"
             }
             body = {
