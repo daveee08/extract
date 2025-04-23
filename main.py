@@ -89,11 +89,11 @@ def parse_rubric(rubric_text):
 # Helper function to process content using AI (Quasar model)
 def process_with_ai(content):
     headers = {
-        "Authorization": f"Bearer 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",
+        "Authorization": f"Bearer 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",
         "Content-Type": "application/json"
     }
     body = {
-        "model": "openrouter/quasar-alpha",
+        "model": "qwen/qwq-32b:free",
         "messages": [{
             "role": "user",
             "content": """The following text comes from an academic PDF. 
